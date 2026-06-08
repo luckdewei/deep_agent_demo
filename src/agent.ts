@@ -198,16 +198,57 @@ ${this.config.systemPrompt}`
         return { content: fullContent, messages: this.conversationHistory, filesWritten }
     }
 
+    /**
+     * 从 AI 回复中提取 filename 代码块。
+     * 文件内容里常含 ```bash 等嵌套代码块，不能用非贪婪正则匹配到第一个 ``` 就停止。
+     */
+    private extractFileBlocks(content: string): Array<{ filename: string; fileContent: string }> {
+        const results: Array<{ filename: string; fileContent: string }> = []
+        const openRegex = /```(?:filename:|file:)([^\n]+)\n/g
+        let match
+
+        while ((match = openRegex.exec(content)) !== null) {
+            const filename = match[1].trim()
+            let pos = match.index + match[0].length
+            let fenceDepth = 1
+            const lines: string[] = []
+
+            while (pos < content.length) {
+                const lineEnd = content.indexOf('\n', pos)
+                const lineEndPos = lineEnd === -1 ? content.length : lineEnd
+                const line = content.slice(pos, lineEndPos)
+
+                const fenceMatch = line.match(/^(`{3,})(.*)$/)
+                if (fenceMatch) {
+                    const rest = fenceMatch[2].trim()
+                    if (fenceDepth === 1 && rest === '') {
+                        break
+                    }
+                    if (fenceDepth === 1) {
+                        fenceDepth++
+                    } else if (rest === '') {
+                        fenceDepth--
+                    } else {
+                        fenceDepth++
+                    }
+                }
+
+                lines.push(line)
+                pos = lineEnd === -1 ? content.length : lineEnd + 1
+            }
+
+            results.push({ filename, fileContent: lines.join('\n').trimEnd() })
+        }
+
+        return results
+    }
+
     private async processFileOperations(content: string): Promise<string[]> {
         if (!this.sandbox) return []
 
         const filesWritten: string[] = []
-        const fileBlockRegex = /```(?:filename:|file:)([^\n]+)\n([\s\S]*?)```/g
-        let match
 
-        while ((match = fileBlockRegex.exec(content)) !== null) {
-            const filename = match[1].trim()
-            const fileContent = match[2].trim()
+        for (const { filename, fileContent } of this.extractFileBlocks(content)) {
             try {
                 const approved = await hitlCheckpoint(
                     `写入文件：${filename}`,
